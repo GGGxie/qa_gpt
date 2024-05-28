@@ -15,25 +15,26 @@ class ZhipuAIEmbeddings(BaseModel, Embeddings):
 
     zhipuai_api_key: Optional[str] = None
     """Zhipuai application apikey"""
+    
+    client: Any = None  # 添加这个字段来存储客户端对象
 
-    @root_validator()
+    @root_validator(pre=True)
     def validate_environment(cls, values: Dict) -> Dict:
         """
         Validate whether zhipuai_api_key in the environment variables or
         configuration file are available or not.
 
         Args:
-
             values: a dictionary containing configuration information, must include the
             fields of zhipuai_api_key
-        Returns:
 
+        Returns:
             a dictionary containing configuration information. If zhipuai_api_key
             are not provided in the environment variables or configuration
             file, the original values will be returned; otherwise, values containing
             zhipuai_api_key will be returned.
-        Raises:
 
+        Raises:
             ValueError: zhipuai package not found, please install it with `pip install
             zhipuai`
         """
@@ -43,34 +44,42 @@ class ZhipuAIEmbeddings(BaseModel, Embeddings):
             "ZHIPUAI_API_KEY",
         )
 
-        # try:
-        #     import zhipuai
-        #     zhipuai.api_key = values["zhipuai_api_key"]
-        #     values["client"] = zhipuai.model_api
+        try:
+            from zhipuai import ZhipuAI
+            values["client"] = ZhipuAI(api_key=values["zhipuai_api_key"])
 
-        # except ImportError:
-        #     raise ValueError(
-        #         "Zhipuai package not found, please install it with "
-        #         "`pip install zhipuai`"
-        #     )
+        except ImportError:
+            raise ValueError(
+                "Zhipuai package not found, please install it with "
+                "`pip install zhipuai`"
+            )
         return values
 
-    def _embed(self, texts: str) -> List[float]:
+    def __call__(self, input: str) -> List[float]:
+        """
+        Embedding a single text input.
+        
+        Args:
+            input (str): A text to be embedded.
+        
+        Returns:
+            List[float]: An embedding list of input text, which is a list of floating-point values.
+        """
+        return self._embed(input)
+
+    def _embed(self, text: str) -> List[float]:
         # send request
         try:
-            resp = self.client.invoke(
+            response = self.client.embeddings.create(
                 model="embedding-2",
-                input=texts
+                input=text
             )
         except Exception as e:
             raise ValueError(f"Error raised by inference endpoint: {e}")
-
-        if resp["code"] != 200:
-            raise ValueError(
-                "Error raised by inference API HTTP code: %s, %s"
-                % (resp["code"], resp["msg"])
-            )
-        embeddings = resp["data"]["embedding"]
+        if not response.data and not response.data[0].embedding:
+            raise ValueError("Invalid response received from the API")
+        
+        embeddings = response.data[0].embedding
         return embeddings
 
     def embed_query(self, text: str) -> List[float]:
@@ -78,15 +87,12 @@ class ZhipuAIEmbeddings(BaseModel, Embeddings):
         Embedding a text.
 
         Args:
-
-            Text (str): A text to be embedded.
+            text (str): A text to be embedded.
 
         Return:
-
             List [float]: An embedding list of input text, which is a list of floating-point values.
         """
-        resp = self.embed_documents([text])
-        return resp[0]
+        return self._embed(text)
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """

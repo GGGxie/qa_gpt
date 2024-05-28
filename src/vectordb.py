@@ -1,32 +1,32 @@
+from zhipu_embedding import ZhipuAIEmbeddings
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_models import ChatZhipuAI
-from langchain.memory import ConversationBufferMemory
-import zhipu_embedding
+from langchain.chains import create_history_aware_retriever
 from langchain.prompts import PromptTemplate
-from langchain.vectorstores import Chroma
-from langchain.chains import RetrievalQA,ConversationalRetrievalChain
+from langchain_chroma import Chroma
+from langchain.chains import RetrievalQA
 from langchain_core.messages import HumanMessage
-class VectorDB():
-    vectordb: Chroma
-    def __init__(self,ZhipuAIEmbeddings,path,documents):
-        self.vectordb =Chroma.from_documents(
-            embedding=ZhipuAIEmbeddings,
-            persist_directory=path,
-            documents=documents
-        )
-    def persist(self):
-        self.vectordb.persist()# 允许我们将persist_directory目录保存到磁盘上
+from chromadb.config import Settings
+
+### Statefully manage chat history ###
+store = {}
+# class VectorDB():
+#     vectordb: Chroma
+#     def __init__(self,embedding, persist_directory):
+#         self.vectordb =Chroma(
+#             embedding_function=embedding,
+#             persist_directory=persist_directory  
+#         )
+persist_directory = 'data/vector_db/chroma'
+vectordb = Chroma(embedding_function=ZhipuAIEmbeddings(),persist_directory=persist_directory)
 
 # 加载向量数据库
 def get_vectordb():
-    # 定义 Embeddings
-    embedding = zhipu_embedding.ZhipuAIEmbeddings()
-    # 向量数据库持久化路径
-    persist_directory = 'data/vector_db/chroma'
-    # 加载数据库
-    vectordb = Chroma(
-        persist_directory=persist_directory,  # 允许我们将persist_directory目录保存到磁盘上
-        embedding_function=embedding
-    )
     return vectordb
 
 def generate_response(input_text):
@@ -59,17 +59,66 @@ def get_qa_chain(question:str):
 
 #带有历史记录的问答链
 def get_chat_qa_chain(question:str):
-    vectordb = get_vectordb()
-    llm = ChatZhipuAI(model_name = "gpt-3.5-turbo", temperature = 0)
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",  # 与 prompt 的输入变量保持一致。
-        return_messages=True  # 将以消息列表的形式返回聊天记录，而不是单个字符串
+    llm = ChatZhipuAI(model="glm-3-turbo",temperature=0)
+    vectordbt = get_vectordb()
+    retriever=vectordbt.as_retriever()
+
+    ### Contextualize question ###
+    contextualize_q_system_prompt = (
+        "Given a chat history and the latest user question "
+        "which might reference context in the chat history, "
+        "formulate a standalone question which can be understood "
+        "without the chat history. Do NOT answer the question, "
+        "just reformulate it if needed and otherwise return it as is."
     )
-    retriever=vectordb.as_retriever()
-    qa = ConversationalRetrievalChain.from_llm(
-        llm,
-        retriever=retriever,
-        memory=memory
+    contextualize_q_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
     )
-    result = qa.invoke({"question": question})
-    return result['answer']
+
+    history_aware_retriever = create_history_aware_retriever(
+        llm, retriever, contextualize_q_prompt
+    )
+
+
+    ### Answer question ###
+    system_prompt = (
+        "You are an assistant for question-answering tasks. "
+        "Use the following pieces of retrieved context to answer "
+        "the question. If you don't know the answer, say that you "
+        "don't know. Use three sentences maximum and keep the "
+        "answer concise."
+        "\n\n"
+        "{context}"
+    )
+    qa_prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ]
+    )
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+    def get_session_history(session_id: str) -> BaseChatMessageHistory:
+        if session_id not in store:
+            store[session_id] = ChatMessageHistory()
+        return store[session_id]
+
+
+    conversational_rag_chain = RunnableWithMessageHistory(
+        rag_chain,
+        get_session_history,
+        input_messages_key="input",
+        history_messages_key="chat_history",
+        output_messages_key="answer",
+    )
+    return conversational_rag_chain.invoke(
+        {"input": question},
+        config={"configurable": {"session_id": "abc123"}}
+    )["answer"]
