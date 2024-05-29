@@ -1,6 +1,6 @@
 # Streamlit 应用程序界面
 import streamlit as st
-import vectordb,os
+import answer,os
 
 # api_key: 609356d25d7f1939ab974b04b4e803a1.EjZO8ylvTqlLxWve
 
@@ -25,11 +25,11 @@ def main():
         # 调用 respond 函数获取回答
         st.session_state.messages.append({"role": "user", "text": prompt})
         if selected_method == 'None':
-            answer = vectordb.generate_response(prompt)
+            answer = answer.generate_response(prompt)
         elif selected_method=='qa_chain':
-            answer = vectordb.get_qa_chain(prompt)
+            answer = answer.get_qa_chain(prompt)
         elif selected_method =='chat_qa_chain':
-            answer = vectordb.get_chat_qa_chain(prompt) 
+            answer = answer.get_chat_qa_chain(prompt) 
         
         # 检查回答是否为 None
         if answer is not None:
@@ -38,7 +38,7 @@ def main():
 
         # 显示整个对话历史
         for message in st.session_state.messages:
-            if message["role"] == "user":
+            if  ["role"] == "user":
                 messages.chat_message("user").write(message["text"])
             elif message["role"] == "assistant":
                 messages.chat_message("assistant").write(message["text"])   
