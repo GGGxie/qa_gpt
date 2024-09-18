@@ -1,133 +1,113 @@
-from langchain.chains import create_retrieval_chain, create_history_aware_retriever
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.runnables.history import RunnableWithMessageHistory
-from langchain.tools import Tool
-from langchain_core.messages import HumanMessage, AIMessage
-from langgraph.graph import END, StateGraph, add_messages
-from langgraph.prebuilt import ToolNode
-from langchain.schema import Document
-from langchain_community.tools.tavily_search import TavilySearchResults
-from typing import List, TypedDict
-from langgraph.checkpoint.memory import MemorySaver
-from langchain import hub
-from langchain_core.messages import AnyMessage
-from typing import Annotated
-from langchain_core.prompts import PromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field
+from typing import List, TypedDict, Annotated
+from langchain_core.messages import HumanMessage, AIMessage, AnyMessage
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langgraph.graph import END, StateGraph, add_messages
+from langchain.schema import Document
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_community.tools.tavily_search import TavilySearchResults
 
 
+# 定义评分结果的 Pydantic 模型
 class GradeDocuments(BaseModel):
-    """Binary score for relevance check on retrieved documents."""
-
     binary_score: str = Field(
         description="Documents are relevant to the question, 'yes' or 'no'"
     )
 
 
+# 定义 GraphState，用于存储运行时状态
+class GraphState(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
+    question: str
+    generation: str
+    documents: List[Document]
+    search_flag: bool
+
+
+# 主类，包含文档检索、评分、生成对话等功能
 class AutoChat:
-    def __init__(self, llm, retriver, temperature=0.9, max_tokens=1024):
+    def __init__(self, llm, retriever, temperature=0.9, max_tokens=1024):
         self.llm = llm
+        self.retriever = retriever
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.web_search_tool = TavilySearchResults(k=3)
+
+        # 加载提示模板
         self.prompt = PromptTemplate.from_file(
             "prompts/chat/chat.txt", ["context", "question"]
         )
-        print(self.prompt)
-        self.retriver = retriver
 
-        # Prompt
-        system = """You are a grader assessing relevance of a retrieved document to a user question. \n 
+        # 定义评分提示和解析器
+        system_prompt = """You are a grader assessing relevance of a retrieved document to a user question. \n 
             If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. \n
             It does not need to be a stringent test. The goal is to filter out erroneous retrievals. \n
             Return the result as a JSON object with a key 'binary_score' and a value of 'yes' or 'no'to indicate whether the document is relevant to the question."""
-
         grade_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", system),
+                ("system", system_prompt),
                 (
                     "human",
-                    "Retrieved document: \n\n {document} \n\n User question: {question}",
+                    "Retrieved document: {document}\n\nUser question: {question}",
                 ),
             ]
         )
         parser = PydanticOutputParser(pydantic_object=GradeDocuments)
         self.retrieval_grader = grade_prompt | self.llm | parser
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        # self.web_search_tool = TavilySearchResults(k=3)
+
+        # 初始化生成链
         self.rag_chain = self.prompt | self.llm
+
+        # 初始化流程图
         self.init_graph()
 
     def init_graph(self):
         workflow = StateGraph(GraphState)
-        # 添加节点
-        workflow.add_node("generate", self.generate)
-        # workflow.add_node("web_search", self.web_search)
         workflow.add_node("retrieve", self.retrieve)
         workflow.add_node("grade_documents", self.grade_documents)
-        # 添加边
-        # workflow.add_conditional_edges("generate", self.should_continue)
-        workflow.add_edge("retrieve", "grade_documents")
+        workflow.add_node("web_search", self.web_search)
+        workflow.add_node("generate", self.generate)
+        workflow.add_edge("retrieve", "web_search")
+        workflow.add_edge("web_search", "grade_documents")
         workflow.add_edge("grade_documents", "generate")
         workflow.add_edge("generate", END)
-        # 设置入口点
         workflow.set_entry_point("retrieve")
-        # 使用 MemorySaver 持久化存储
+
+        # 使用 MemorySaver 来持久化存储状态
         self.app = workflow.compile(checkpointer=memory)
 
     def grade_documents(self, state):
-        print("---CHECK DOCUMENT RELEVANCE TO QUESTION---")
+        """筛选与用户问题相关的文档"""
         question = state["question"]
         documents = state["documents"]
+        relevant_docs = []
+        if documents is not None:
+            for doc in documents:
+                score = self.retrieval_grader.invoke(
+                    {"question": question, "document": doc.page_content}
+                )
+                if score.binary_score == "yes":
+                    relevant_docs.append(doc)
 
-        # Score each doc
-        filtered_docs = []
-        for d in documents:
-            score = self.retrieval_grader.invoke(
-                {"question": question, "document": d.page_content}
-            )
-            grade = score.binary_score
-            if grade == "yes":
-                print("---GRADE: DOCUMENT RELEVANT---")
-                filtered_docs.append(d)
-            else:
-                print("---GRADE: DOCUMENT NOT RELEVANT---")
-                continue
-        state["documents"] = filtered_docs
+        state["documents"] = relevant_docs
         return state
 
     def generate(self, state):
+        """根据筛选的文档生成回复"""
         question = state["question"]
         documents = state["documents"]
-        # RAG generation
-        response = self.rag_chain.invoke(
-            # message
-            {"context": documents, "question": question}
-        )
-        # state["messages"].append(response)
+        response = self.rag_chain.invoke({"context": documents, "question": question})
+
         if isinstance(response, AIMessage):
-            generation = response.content
+            state["generation"] = response.content
         else:
             raise TypeError(f"Expected AIMessage but got {type(response)}")
-        state["generation"] = generation
+
         return state
 
-    def _load_prompts(self, file_path):
-        prompts = {}
-        with open(file_path, "r") as file:
-            content = file.read()
-            sections = content.split("\n\n")
-            for section in sections:
-                lines = section.split("\n", 1)
-                if len(lines) == 2:
-                    key, prompt = lines
-                    prompts[key.rstrip(":")] = prompt.strip()
-        return prompts
-
     def web_search(self, state):
-        state["search_flag"] = True
+        """执行网络搜索"""
         question = state["question"]
 
         # Web search
@@ -147,28 +127,21 @@ class AutoChat:
         return state
 
     def retrieve(self, state):
-        print("---RETRIEVE---")
+        """检索相关文档"""
         question = state["question"]
-        # Retrieval
         try:
-            documents = self.retriver.invoke(question)
+            documents = self.retriever.invoke(question)
+            state["documents"] = documents
         except Exception as e:
-            print(e)
-        print(documents)
-        state["documents"] = documents
+            print(f"Retrieval failed: {e}")
+            state["documents"] = []
+
         return state
 
-    def should_continue(self, state) -> str:
-        last_message = state["generation"]
-        if (
-            "I don't know" in last_message or "I cannot" in last_message
-        ) and not state.get("search_flag", False):
-            return "web_search"
-        return END
-
     def run(self, task: str, thread_id="2") -> str:
+        """执行任务并返回生成的回复"""
         state = GraphState(
-            messages=HumanMessage(content=task),
+            messages=[HumanMessage(content=task)],
             question=task,
             generation="",
             documents=[],
@@ -176,16 +149,8 @@ class AutoChat:
         )
         config = {"configurable": {"thread_id": thread_id}}
         final_state = self.app.invoke(state, config)
-        print(state)
         return final_state["generation"]
 
 
-class GraphState(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    question: str
-    generation: str
-    documents: List[str]
-    search_flag: bool
-
-
+# MemorySaver 用于存储历史
 memory = MemorySaver()

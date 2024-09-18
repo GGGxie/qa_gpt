@@ -12,7 +12,7 @@ sys.path.append(".")
 import streamlit as st
 from src import chat
 from langchain_openai import ChatOpenAI
-from vecdb import vectordb
+from vecdb import vectordb, loader
 
 
 def main():
@@ -29,12 +29,20 @@ def main():
     )
     autoChat = chat.AutoChat(
         llm=llm,
-        retriver=vectordb.get_vectordb().as_retriever(),
+        retriever=vectordb.get_vectordb().as_retriever(),
         # tools=tools,
         # work_dir="./data",
         # main_prompt_file="./prompts/main/main.txt",
         # max_thought_steps=20,
     )
+
+    st.title("知识库文档上传")
+
+    # 上传文件
+    uploaded_file = st.file_uploader("上传 PDF 或 XLSX 文件", type=["pdf", "xlsx"])
+
+    if uploaded_file is not None:
+        loader.handle_uploaded_file(uploaded_file)
 
     st.title("🦜🔗 动手学大模型应用开发")
     # zhipu_api_key = st.sidebar.text_input('OpenAI API Key', type='password')
