@@ -10,7 +10,7 @@ import os, sys
 sys.path.append(".")
 
 import streamlit as st
-from src import chat
+from src import chat, agent
 from langchain_openai import ChatOpenAI
 from vecdb import vectordb, loader
 
@@ -23,11 +23,11 @@ def main():
     llm = ChatOpenAI(
         model="gpt-4-turbo",
         temperature=0,
-        model_kwargs={"seed": 42},
+        # model_kwargs={"seed": 42},
         openai_api_key=api_key,
         openai_api_base=base_url,
     )
-    autoChat = chat.AutoChat(
+    auto_chat = chat.AutoChat(
         llm=llm,
         retriever=vectordb.get_vectordb().as_retriever(),
         # tools=tools,
@@ -35,8 +35,12 @@ def main():
         # main_prompt_file="./prompts/main/main.txt",
         # max_thought_steps=20,
     )
+    my_agent = agent.MyAgent(
+        llm=llm,
+        retriever=vectordb.get_vectordb().as_retriever(),
+    )
 
-    st.title("知识库文档上传")
+    st.title("一、知识库文档")
 
     # 上传文件
     uploaded_file = st.file_uploader("上传 PDF 或 XLSX 文件", type=["pdf", "xlsx"])
@@ -44,16 +48,17 @@ def main():
     if uploaded_file is not None:
         loader.handle_uploaded_file(uploaded_file)
 
-    st.title("🦜🔗 动手学大模型应用开发")
+    st.title("二、个人助手")
     # zhipu_api_key = st.sidebar.text_input('OpenAI API Key', type='password')
     # 添加一个选择按钮来选择不同的模型
     # selected_method = st.sidebar.selectbox("选择模式", ["qa_chain", "chat_qa_chain", "None"])
     selected_method = st.radio(
         "你想选择哪种模式进行对话？",
         # ["None", "qa_chain", "chat_qa_chain"],
-        ["gpt4-o"],
+        ["gpt4-o", "agent"],
         captions=[
-            "gpt4-o大模型"
+            "gpt4-o大模型",
+            "私人助手",
             # "不使用检索问答的普通模式",
             # "不带历史记录的检索问答模式",
             # "带历史记录的检索问答模式",
@@ -69,16 +74,9 @@ def main():
         # 调用 respond 函数获取回答
         st.session_state.messages.append({"role": "user", "text": task})
         if selected_method == "gpt4-o":
-            answer = autoChat.run(task)
-        elif selected_method == "None":
-            # answer = call.generate_response(task)
-            pass
-        elif selected_method == "qa_chain":
-            # answer = call.get_qa_chain(task)
-            pass
-        elif selected_method == "chat_qa_chain":
-            # answer = call.get_chat_qa_chain(task)
-            pass
+            answer = auto_chat.run(task)
+        elif selected_method == "agent":
+            answer = my_agent.run(task)
 
         # 检查回答是否为 None
         if answer is not None:
